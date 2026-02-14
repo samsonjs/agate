@@ -159,6 +159,23 @@ fn get(args: &[&str], url: &str) -> Result<Response, String> {
     response
 }
 
+fn avoid_default_port_conflict() {
+    if PORT.load(Ordering::SeqCst) == DEFAULT_PORT {
+        PORT.store(34000, Ordering::SeqCst);
+    }
+}
+
+#[cfg(unix)]
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("agate-{prefix}-{}-{nanos}", std::process::id()))
+}
+
 #[test]
 /// - serves index page for a directory
 /// - serves the correct content
@@ -433,6 +450,38 @@ fn serve_secret_meta_config_subdir() {
         get(&["-C"], "gemini://localhost/.well-known/servable-secret").expect("could not get page");
 
     assert_eq!(page.status, Status::Success.value());
+}
+
+#[cfg(unix)]
+#[test]
+/// - symlinks should not allow serving files outside the content root
+fn symlink_escape_outside_content_root() {
+    avoid_default_port_conflict();
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    let base = unique_temp_dir("symlink-escape");
+    let content = base.join("content");
+    fs::create_dir_all(&content).unwrap();
+
+    let secret = base.join("outside-secret.gmi");
+    fs::write(&secret, b"outside secret").unwrap();
+    symlink(&secret, content.join("leak.gmi")).unwrap();
+
+    let page = get(
+        &[
+            "--content",
+            content
+                .to_str()
+                .expect("could not convert temp content path to string"),
+        ],
+        "gemini://localhost/leak.gmi",
+    )
+    .expect("could not get page");
+
+    let _ = fs::remove_dir_all(&base);
+
+    assert_eq!(page.status, Status::NotFound.value());
 }
 
 #[test]
