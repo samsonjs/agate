@@ -159,6 +159,73 @@ fn get(args: &[&str], url: &str) -> Result<Response, String> {
     response
 }
 
+fn avoid_default_port_conflict() {
+    if PORT.load(Ordering::SeqCst) == DEFAULT_PORT {
+        PORT.store(34000, Ordering::SeqCst);
+    }
+}
+
+fn capture_server_logs_for_raw_request(args: &[&str], request_line: &str) -> String {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    avoid_default_port_conflict();
+    let addr = (
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        PORT.fetch_add(1, Ordering::SeqCst),
+    )
+        .to_socket_addrs()
+        .unwrap()
+        .next()
+        .unwrap();
+
+    let mut server = Command::new(BINARY_PATH)
+        .stderr(Stdio::piped())
+        .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data"))
+        .args(["--addr", &addr.to_string()])
+        .args(args)
+        .env("RUST_LOG", "debug")
+        .spawn()
+        .expect("failed to start binary");
+
+    let mut reader = BufReader::new(server.stderr.take().unwrap());
+    let mut buffer = String::new();
+    while matches!(reader.read_line(&mut buffer), Ok(i) if i > 0) {
+        if buffer.contains("Started") {
+            break;
+        }
+        buffer.clear();
+    }
+
+    let mut certs = RootCertStore::empty();
+    certs
+        .add(CertificateDer::from(
+            include_bytes!("data/multicert/example.com/cert.der").as_slice(),
+        ))
+        .unwrap();
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(certs)
+        .with_no_client_auth();
+    let mut session = ClientConnection::new(
+        std::sync::Arc::new(config),
+        "example.com".try_into().unwrap(),
+    )
+    .unwrap();
+    let mut tcp = TcpStream::connect(addr).unwrap();
+    let mut tls = rustls::Stream::new(&mut session, &mut tcp);
+
+    write!(tls, "{request_line}\r\n").unwrap();
+    let mut response = [0; 64];
+    let _ = tls.read(&mut response);
+
+    sleep(Duration::from_millis(30));
+    server.kill().unwrap();
+    let _ = server.wait();
+
+    let mut logs = String::new();
+    reader.read_to_string(&mut logs).unwrap();
+    logs
+}
+
 #[test]
 /// - serves index page for a directory
 /// - serves the correct content
@@ -466,6 +533,17 @@ fn directory_traversal_regression() {
         let page = get(&[], url.as_str()).expect("could not get page");
         assert_eq!(page.status, Status::NotFound.value());
     }
+}
+
+#[test]
+/// - request text should be escaped in logs so status/meta cannot be forged
+fn request_log_quote_injection() {
+    let logs = capture_server_logs_for_raw_request(
+        &["--certs", "multicert"],
+        "gemini://example.com/test\" 20 \"INJECT",
+    );
+
+    assert!(!logs.contains("\"gemini://example.com/test\" 20 \"INJECT\""));
 }
 
 #[test]
