@@ -445,7 +445,7 @@ fn serve_secret_meta_config_subdir() {
 /// - hidden files should stay hidden even when the dot is percent-encoded
 fn secret_percent_encoded_dot() {
     avoid_default_port_conflict();
-    let page = get(&[], "gemini://localhost/%2emeta").expect("could not get page");
+    let page = get(&[], "gemini://localhost/%2eenv").expect("could not get page");
 
     assert_eq!(page.status, Status::Gone.value());
 }
@@ -454,8 +454,7 @@ fn secret_percent_encoded_dot() {
 /// - hidden subdirectory segments should stay hidden even when dot is encoded
 fn secret_subdir_percent_encoded_dot() {
     avoid_default_port_conflict();
-    let page =
-        get(&["-C"], "gemini://localhost/%2Ewell-known/hidden-file").expect("could not get page");
+    let page = get(&[], "gemini://localhost/%2esecret/hidden-file").expect("could not get page");
 
     assert_eq!(page.status, Status::Gone.value());
 }
